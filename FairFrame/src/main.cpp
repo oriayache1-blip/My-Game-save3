@@ -485,24 +485,6 @@ class $modify(FairFramePlayLayer, PlayLayer) {
     }
 };
 
-class $modify(FairFrameGameLayer, GJBaseGameLayer) {
-    void destroyPlayer(PlayerObject* player, GameObject* object) {
-        if (PlayLayer::get() == this) {
-            if (g_state.recording) {
-                g_state.recording = false;
-                if (!g_state.events.empty()) exportTake(PlayLayer::get(), true);
-                g_state.lastMessage = "TAKE SAVED ON DEATH";
-            }
-            if (g_state.playing) {
-                g_state.playing = false;
-                g_state.replayHeld.clear();
-                g_state.lastMessage = "REPLAY STOPPED ON DEATH";
-            }
-        }
-        GJBaseGameLayer::destroyPlayer(player, object);
-    }
-};
-
 class $modify(FairFramePlayerObject, PlayerObject) {
     bool pushButton(PlayerButton button) {
         const bool handled = PlayerObject::pushButton(button);
