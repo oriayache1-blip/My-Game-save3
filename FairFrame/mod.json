@@ -1,0 +1,10 @@
+{
+  "geode": "5.11.2",
+  "gd": { "win": "2.2081" },
+  "id": "fairframe.frame-counter",
+  "name": "FairFrame",
+  "version": "v0.5.0",
+  "developer": "FairFrame",
+  "description": "Frame counter, practice-aware replay, and 1–17 frame-window review.",
+  "tags": ["utility", "offline", "interface"]
+}
