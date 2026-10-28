@@ -38,6 +38,9 @@ namespace {
         bool playing = false;
         bool showHud = true;
         bool playbackFinished = false;
+        bool takeRecordedPractice = false;
+        bool takeStartedAtCheckpoint = false;
+        CheckpointObject* recordingCheckpoint = nullptr;
         size_t replayIndex = 0;
         std::string lastMessage = "READY";
         std::vector<FrameEvent> events;
@@ -204,6 +207,28 @@ namespace {
         }
     }
 
+
+    void clearRecordingCheckpoint() {
+        if (g_state.recordingCheckpoint) {
+            g_state.recordingCheckpoint->release();
+            g_state.recordingCheckpoint = nullptr;
+        }
+    }
+
+    void captureRecordingStart(PlayLayer* layer) {
+        clearRecordingCheckpoint();
+        g_state.takeRecordedPractice = layer && layer->m_isPracticeMode;
+        g_state.takeStartedAtCheckpoint = false;
+
+        if (!layer || !g_state.takeRecordedPractice) return;
+
+        if (auto checkpoint = layer->getLastCheckpoint()) {
+            checkpoint->retain();
+            g_state.recordingCheckpoint = checkpoint;
+            g_state.takeStartedAtCheckpoint = true;
+        }
+    }
+
     bool exportTake(PlayLayer* layer, bool quiet = false) {
         if (g_state.events.empty()) {
             if (!quiet) {
@@ -225,7 +250,9 @@ namespace {
 
         file << "# FairFrame input take\n";
         file << "# Level: " << currentLevelName(layer) << "\n";
-        file << "# Replay restarts from the start of the level; checkpoints are not reproduced.\n";
+        file << "# Practice: " << (g_state.takeRecordedPractice ? 1 : 0) << "\n";
+        file << "# Started at checkpoint: " << (g_state.takeStartedAtCheckpoint ? 1 : 0) << "\n";
+        file << "# Practice checkpoint replay requires the same checkpoint if reopening the take in a later session.\n";
         file << "attempt,frame,player,action,delta_frames,hold_frames\n";
         for (auto const& event : g_state.events) {
             file << event.attempt << ','
@@ -259,9 +286,20 @@ namespace {
         std::vector<FrameEvent> loaded;
         std::string line;
         int latestAttempt = 1;
+        g_state.takeRecordedPractice = false;
+        g_state.takeStartedAtCheckpoint = false;
 
         while (std::getline(file, line)) {
-            if (line.empty() || line[0] == '#') continue;
+            if (line.empty()) continue;
+            if (line.rfind("# Practice: ", 0) == 0) {
+                g_state.takeRecordedPractice = toInt(line.substr(12), 0) != 0;
+                continue;
+            }
+            if (line.rfind("# Started at checkpoint: ", 0) == 0) {
+                g_state.takeStartedAtCheckpoint = toInt(line.substr(25), 0) != 0;
+                continue;
+            }
+            if (line[0] == '#') continue;
             if (line.rfind("attempt,", 0) == 0) {
                 hasPlayerColumn = line.find(",player,") != std::string::npos;
                 continue;
@@ -339,7 +377,8 @@ namespace {
         g_state.lastMessage = std::move(message);
     }
 
-    void beginRecording() {
+    void beginRecording(PlayLayer* layer) {
+        captureRecordingStart(layer);
         g_state.events.clear();
         g_state.pressStartedAt.clear();
         g_state.replayIndex = 0;
@@ -391,6 +430,9 @@ namespace {
 
     void startLevel(PlayLayer* layer) {
         removeHud();
+        clearRecordingCheckpoint();
+        g_state.takeRecordedPractice = false;
+        g_state.takeStartedAtCheckpoint = false;
         g_state.activeLayer = layer;
         g_state.frame = 0;
         g_state.attempt = 1;
@@ -451,7 +493,7 @@ class $modify(FairFramePlayLayer, PlayLayer) {
         if (g_state.recording) {
             g_state.recording = false;
             if (!g_state.events.empty()) exportTake(this, true);
-            g_state.lastMessage = "TAKE SAVED ON RESET";
+            g_state.lastMessage = this->m_isPracticeMode ? "PRACTICE TAKE SAVED" : "TAKE SAVED ON RESET";
         }
         if (g_state.playing) stopReplay(this, "REPLAY STOPPED");
         PlayLayer::resetLevel();
@@ -480,6 +522,7 @@ class $modify(FairFramePlayLayer, PlayLayer) {
         }
         if (g_state.playing) stopReplay(this, "REPLAY STOPPED");
         removeHud();
+        clearRecordingCheckpoint();
         g_state.activeLayer = nullptr;
         PlayLayer::onQuit();
     }
@@ -501,45 +544,50 @@ class $modify(FairFramePlayerObject, PlayerObject) {
 
 class $modify(FairFramePauseLayer, PauseLayer) {
     struct Fields {
+        CCLayerColor* panel = nullptr;
         CCLabelBMFont* status = nullptr;
         CCLabelBMFont* eventsList = nullptr;
         ButtonSprite* recordSprite = nullptr;
         ButtonSprite* replaySprite = nullptr;
         ButtonSprite* hudSprite = nullptr;
+        ButtonSprite* launcherSprite = nullptr;
     };
 
     void customSetup() {
         PauseLayer::customSetup();
 
         auto winSize = CCDirector::sharedDirector()->getWinSize();
-        constexpr float panelWidth = 296.f;
-        constexpr float panelHeight = 276.f;
+        constexpr float panelWidth = 344.f;
+        constexpr float panelHeight = 326.f;
 
-        auto panel = CCLayerColor::create(ccc4(8, 16, 32, 238), panelWidth, panelHeight);
-        panel->setPosition({14.f, winSize.height - panelHeight - 14.f});
-        panel->setID("fairframe-pause-panel"_spr);
+        auto panel = CCLayerColor::create(ccc4(7, 15, 30, 246), panelWidth, panelHeight);
+        panel->setPosition({18.f, winSize.height - panelHeight - 18.f});
+        panel->setID("fairframe-control-panel"_spr);
+        panel->setVisible(false);
+        m_fields->panel = panel;
 
-        auto accent = CCLayerColor::create(ccc4(68, 224, 255, 255), panelWidth, 3.f);
-        accent->setPosition({0.f, panelHeight - 3.f});
+        auto accent = CCLayerColor::create(ccc4(68, 224, 255, 255), panelWidth, 4.f);
+        accent->setPosition({0.f, panelHeight - 4.f});
+        accent->setID("fairframe-panel-accent"_spr);
         panel->addChild(accent, 2);
 
         auto title = CCLabelBMFont::create("FAIRFRAME", "bigFont.fnt");
         title->setAnchorPoint({0.f, 0.5f});
-        title->setPosition({14.f, panelHeight - 24.f});
-        title->setScale(0.62f);
+        title->setPosition({15.f, panelHeight - 25.f});
+        title->setScale(0.68f);
         title->setColor(ccc3(88, 228, 255));
         panel->addChild(title);
 
-        auto subtitle = CCLabelBMFont::create("FREE  /  OFFLINE  /  INPUT REPLAY", "chatFont.fnt");
+        auto subtitle = CCLabelBMFont::create("FRAME LAB  /  FREE INPUT TOOLS", "chatFont.fnt");
         subtitle->setAnchorPoint({0.f, 0.5f});
-        subtitle->setPosition({15.f, panelHeight - 43.f});
-        subtitle->setScale(0.43f);
-        subtitle->setColor(ccc3(150, 178, 210));
+        subtitle->setPosition({16.f, panelHeight - 47.f});
+        subtitle->setScale(0.45f);
+        subtitle->setColor(ccc3(148, 178, 210));
         panel->addChild(subtitle);
 
         auto status = CCLabelBMFont::create(statusText().c_str(), "chatFont.fnt");
         status->setAnchorPoint({0.f, 0.5f});
-        status->setPosition({15.f, panelHeight - 65.f});
+        status->setPosition({16.f, panelHeight - 72.f});
         status->setScale(0.47f);
         status->setColor(ccc3(239, 246, 255));
         status->setID("fairframe-status"_spr);
@@ -547,79 +595,113 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         m_fields->status = status;
 
         auto menu = CCMenu::create();
-        menu->setPosition({panelWidth * 0.5f, 139.f});
-        menu->setID("fairframe-control-menu"_spr);
+        menu->setPosition({panelWidth * 0.5f, 198.f});
+        menu->setID("fairframe-control-buttons"_spr);
 
-        auto recordSprite = ButtonSprite::create("RECORD / STOP", "bigFont.fnt", "GJ_button_01.png", 0.68f);
-        recordSprite->setScale(0.50f);
+        auto recordSprite = ButtonSprite::create("RECORD / STOP", "bigFont.fnt", "GJ_button_01.png", 0.66f);
+        recordSprite->setScale(0.48f);
         m_fields->recordSprite = recordSprite;
         auto recordButton = CCMenuItemSpriteExtra::create(
             recordSprite, this, menu_selector(FairFramePauseLayer::onToggleRecording)
         );
-        recordButton->setPosition({-68.f, 35.f});
+        recordButton->setPosition({-82.f, 0.f});
         recordButton->setID("fairframe-record-button"_spr);
         menu->addChild(recordButton);
 
-        auto replaySprite = ButtonSprite::create("REPLAY LAST TAKE", "bigFont.fnt", "GJ_button_02.png", 0.68f);
-        replaySprite->setScale(0.50f);
+        auto replaySprite = ButtonSprite::create("REPLAY TAKE", "bigFont.fnt", "GJ_button_02.png", 0.66f);
+        replaySprite->setScale(0.48f);
         m_fields->replaySprite = replaySprite;
         auto replayButton = CCMenuItemSpriteExtra::create(
             replaySprite, this, menu_selector(FairFramePauseLayer::onToggleReplay)
         );
-        replayButton->setPosition({68.f, 35.f});
+        replayButton->setPosition({82.f, 0.f});
         replayButton->setID("fairframe-replay-button"_spr);
         menu->addChild(replayButton);
 
-        auto exportSprite = ButtonSprite::create("EXPORT CSV", "bigFont.fnt", "GJ_button_02.png", 0.68f);
-        exportSprite->setScale(0.50f);
+        auto exportSprite = ButtonSprite::create("EXPORT CSV", "bigFont.fnt", "GJ_button_02.png", 0.66f);
+        exportSprite->setScale(0.48f);
         auto exportButton = CCMenuItemSpriteExtra::create(
             exportSprite, this, menu_selector(FairFramePauseLayer::onExportCsv)
         );
-        exportButton->setPosition({-68.f, -4.f});
+        exportButton->setPosition({-82.f, -42.f});
         exportButton->setID("fairframe-export-button"_spr);
         menu->addChild(exportButton);
 
-        auto clearSprite = ButtonSprite::create("CLEAR TAKE", "bigFont.fnt", "GJ_button_06.png", 0.68f);
-        clearSprite->setScale(0.50f);
+        auto clearSprite = ButtonSprite::create("CLEAR TAKE", "bigFont.fnt", "GJ_button_06.png", 0.66f);
+        clearSprite->setScale(0.48f);
         auto clearButton = CCMenuItemSpriteExtra::create(
             clearSprite, this, menu_selector(FairFramePauseLayer::onClearTake)
         );
-        clearButton->setPosition({68.f, -4.f});
+        clearButton->setPosition({82.f, -42.f});
         clearButton->setID("fairframe-clear-button"_spr);
         menu->addChild(clearButton);
 
         auto hudSprite = ButtonSprite::create(
             g_state.showHud ? "HUD: ON" : "HUD: OFF",
-            "bigFont.fnt", "GJ_button_04.png", 0.68f
+            "bigFont.fnt", "GJ_button_04.png", 0.66f
         );
-        hudSprite->setScale(0.50f);
+        hudSprite->setScale(0.48f);
         m_fields->hudSprite = hudSprite;
         auto hudButton = CCMenuItemSpriteExtra::create(
             hudSprite, this, menu_selector(FairFramePauseLayer::onToggleHud)
         );
-        hudButton->setPosition({0.f, -43.f});
+        hudButton->setPosition({-82.f, -84.f});
         hudButton->setID("fairframe-hud-button"_spr);
         menu->addChild(hudButton);
+
+        auto closeSprite = ButtonSprite::create("CLOSE", "bigFont.fnt", "GJ_button_06.png", 0.66f);
+        closeSprite->setScale(0.48f);
+        auto closeButton = CCMenuItemSpriteExtra::create(
+            closeSprite, this, menu_selector(FairFramePauseLayer::onToggleMenu)
+        );
+        closeButton->setPosition({82.f, -84.f});
+        closeButton->setID("fairframe-close-button"_spr);
+        menu->addChild(closeButton);
 
         panel->addChild(menu, 3);
 
         auto eventsList = CCLabelBMFont::create(recentEventsText().c_str(), "chatFont.fnt");
         eventsList->setAnchorPoint({0.f, 1.f});
-        eventsList->setPosition({14.f, 66.f});
-        eventsList->setScale(0.43f);
+        eventsList->setPosition({15.f, 104.f});
+        eventsList->setScale(0.45f);
         eventsList->setColor(ccc3(204, 222, 244));
         eventsList->setID("fairframe-recent-events"_spr);
         panel->addChild(eventsList);
         m_fields->eventsList = eventsList;
 
-        auto hint = CCLabelBMFont::create("Replay restarts from the level start.", "chatFont.fnt");
+        auto hint = CCLabelBMFont::create("Practice takes replay from the checkpoint used when recording started.", "chatFont.fnt");
         hint->setAnchorPoint({0.f, 0.5f});
-        hint->setPosition({14.f, 12.f});
-        hint->setScale(0.39f);
+        hint->setPosition({15.f, 13.f});
+        hint->setScale(0.36f);
         hint->setColor(ccc3(140, 164, 194));
         panel->addChild(hint);
 
         this->addChild(panel, 100);
+
+        auto launcherMenu = CCMenu::create();
+        launcherMenu->setPosition({winSize.width - 42.f, winSize.height - 54.f});
+        launcherMenu->setID("fairframe-launcher-menu"_spr);
+
+        auto launcherSprite = ButtonSprite::create("FF", "bigFont.fnt", "GJ_button_04.png", 0.86f);
+        launcherSprite->setScale(0.64f);
+        launcherSprite->setID("fairframe-launcher-icon"_spr);
+        m_fields->launcherSprite = launcherSprite;
+
+        auto launcherButton = CCMenuItemSpriteExtra::create(
+            launcherSprite, this, menu_selector(FairFramePauseLayer::onToggleMenu)
+        );
+        launcherButton->setID("fairframe-open-menu"_spr);
+        launcherMenu->addChild(launcherButton);
+        this->addChild(launcherMenu, 101);
+    }
+
+    void onToggleMenu(CCObject*) {
+        if (!m_fields->panel) return;
+        bool open = !m_fields->panel->isVisible();
+        m_fields->panel->setVisible(open);
+        if (m_fields->launcherSprite) {
+            m_fields->launcherSprite->setString(open ? "X" : "FF");
+        }
     }
 
     void onToggleRecording(CCObject*) {
@@ -639,7 +721,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
             }
         } else {
             if (g_state.playing) stopReplay(layer, "REPLAY STOPPED");
-            beginRecording();
+            beginRecording(layer);
         }
         refreshStatus();
     }
@@ -671,16 +753,45 @@ class $modify(FairFramePauseLayer, PauseLayer) {
 
         g_state.playing = false;
         releaseReplayButtons(layer);
-        layer->resetLevel();
+
+        if (g_state.takeRecordedPractice && g_state.takeStartedAtCheckpoint) {
+            auto checkpoint = g_state.recordingCheckpoint;
+            if (!checkpoint && layer->m_isPracticeMode) {
+                checkpoint = layer->getLastCheckpoint();
+            }
+            if (!checkpoint) {
+                FLAlertLayer::create(
+                    "FairFrame — Practice Take",
+                    "This take started from a practice checkpoint. Place the same checkpoint in this session, then replay again.",
+                    "OK"
+                )->show();
+                refreshStatus();
+                return;
+            }
+            layer->loadFromCheckpoint(checkpoint);
+        } else {
+            if (layer->m_isPracticeMode) {
+                for (int i = 0; i < 256; ++i) {
+                    auto checkpoint = layer->getLastCheckpoint();
+                    if (!checkpoint) break;
+                    layer->removeCheckpoint(false);
+                    if (layer->getLastCheckpoint() == checkpoint) break;
+                }
+            }
+            layer->resetLevel();
+        }
 
         g_state.frame = 0;
         g_state.attempt = 1;
         g_state.replayIndex = 0;
         g_state.replayHeld.clear();
+        g_state.pressStartedAt.clear();
         g_state.playbackFinished = false;
         g_state.recording = false;
         g_state.playing = true;
-        g_state.lastMessage = "REPLAY STARTED";
+        g_state.lastMessage = g_state.takeRecordedPractice
+            ? "PRACTICE REPLAY STARTED"
+            : "REPLAY STARTED";
         this->onResume(nullptr);
     }
 
@@ -699,6 +810,9 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         g_state.previousEventFrame = -1;
         g_state.previousEventAttempt = g_state.attempt;
         g_state.lastMessage = "TAKE CLEARED";
+        clearRecordingCheckpoint();
+        g_state.takeRecordedPractice = false;
+        g_state.takeStartedAtCheckpoint = false;
 
         if (layer) {
             std::error_code ec;
