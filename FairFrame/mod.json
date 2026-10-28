@@ -3,7 +3,7 @@
   "gd": { "win": "2.2081" },
   "id": "fairframe.frame-counter",
   "name": "FairFrame",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "developer": "FairFrame",
   "description": "Free offline frame counter",
   "tags": ["utility", "offline", "interface"]
