@@ -717,14 +717,22 @@ namespace {
     }
 }
 
+    void startNextScanTrial(PlayLayer* layer, bool stateAlreadyReset = false);
+
     void finishScanTarget() {
         if (g_state.scanTargetCursor >= g_state.scanTargets.size()) return;
         const auto target = g_state.scanTargets[g_state.scanTargetCursor];
-        int passed = 0;
-        for (int result : g_state.scanCandidateResults) {
-            if (result == 1) ++passed;
+
+        // Count only the contiguous passing offsets around the original timing.
+        // A discontinuous passing offset is not a usable timing window.
+        int measured = 0;
+        if (g_state.scanCandidateResults.size() == 35 &&
+            g_state.scanCandidateResults[17] == 1) {
+            measured = 1;
+            for (int i = 16; i >= 0 && g_state.scanCandidateResults[i] == 1; --i) ++measured;
+            for (int i = 18; i <= 34 && g_state.scanCandidateResults[i] == 1; ++i) ++measured;
         }
-        g_state.windowSizes[target] = passed > 0 ? std::min(17, passed) : 0;
+        g_state.windowSizes[target] = measured > 0 ? std::min(17, measured) : 0;
         rebuildWindowCounts();
         ++g_state.scanTargetCursor;
         g_state.scanOffset = -17;
@@ -744,7 +752,7 @@ namespace {
         startNextScanTrial(layer, stateAlreadyReset);
     }
 
-    void startNextScanTrial(PlayLayer* layer, bool stateAlreadyReset = false) {
+    void startNextScanTrial(PlayLayer* layer, bool stateAlreadyReset) {
         if (!g_state.windowScanActive || !layer) return;
 
         while (g_state.scanTargetCursor < g_state.scanTargets.size()) {
@@ -831,6 +839,15 @@ namespace {
                 "OK"
             )->show();
             return false;
+        }
+
+        if (!g_state.takeRecordedPractice && layer->m_isPracticeMode) {
+            for (int i = 0; i < 256; ++i) {
+                auto checkpoint = layer->getLastCheckpoint();
+                if (!checkpoint) break;
+                layer->removeCheckpoint(false);
+                if (layer->getLastCheckpoint() == checkpoint) break;
+            }
         }
 
         g_state.scanTargets.clear();
