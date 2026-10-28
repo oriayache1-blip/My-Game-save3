@@ -814,7 +814,6 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         }
 
         g_state.frame = 0;
-        g_state.takeDurationFrames = 0;
         g_state.attempt = 1;
         g_state.replayIndex = 0;
         g_state.replayHeld.clear();
