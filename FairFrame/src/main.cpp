@@ -410,7 +410,6 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         }
         if (m_fields->recordSprite) {
             m_fields->recordSprite->setString(g_state.recording ? "Stop Recording" : "Start Recording");
-            m_fields->recordSprite->updateSprite();
         }
         refreshStatus();
     }
