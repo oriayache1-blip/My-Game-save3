@@ -5,6 +5,7 @@
 #include <Geode/modify/PlayerObject.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -42,6 +43,28 @@ namespace {
         bool takeRecordedPractice = false;
         bool takeStartedAtCheckpoint = false;
         CheckpointObject* recordingCheckpoint = nullptr;
+        CCLayerColor* reviewPanel = nullptr;
+        CCLabelBMFont* reviewStatus = nullptr;
+        CCLabelBMFont* reviewLeft = nullptr;
+        CCLabelBMFont* reviewRight = nullptr;
+        CCLabelBMFont* reviewUnknown = nullptr;
+        bool windowReviewActive = false;
+        bool windowScanActive = false;
+        bool windowScanTrialActive = false;
+        bool scanInternalReset = false;
+        int scanTrialSerial = 0;
+        int scanOffset = -17;
+        int scanCurrentOffset = 0;
+        int scanDeadlineFrame = 0;
+        int scanTrialsDone = 0;
+        int scanTrialsTotal = 0;
+        int scanUnknownCount = 0;
+        size_t scanTargetCursor = 0;
+        size_t scanTargetEventIndex = 0;
+        std::vector<size_t> scanTargets;
+        std::vector<int> scanCandidateResults;
+        std::vector<int> windowSizes;
+        std::array<int, 18> windowCounts{};
         size_t replayIndex = 0;
         std::string lastMessage = "READY";
         std::vector<FrameEvent> events;
@@ -76,6 +99,11 @@ namespace {
     std::filesystem::path takePath(PlayLayer* layer) {
         return Mod::get()->getSaveDir() /
             ("FairFrame-" + safeFilename(currentLevelName(layer)) + "-latest.csv");
+    }
+
+    std::filesystem::path windowResultsPath(PlayLayer* layer) {
+        return Mod::get()->getSaveDir() /
+            ("FairFrame-" + safeFilename(currentLevelName(layer)) + "-windows.csv");
     }
 
     int toInt(std::string const& text, int fallback = 0) {
@@ -152,6 +180,173 @@ namespace {
         g_state.hudBody = nullptr;
     }
 
+    void removeReviewHud() {
+        if (g_state.reviewPanel) {
+            g_state.reviewPanel->removeFromParentAndCleanup(true);
+        }
+        g_state.reviewPanel = nullptr;
+        g_state.reviewStatus = nullptr;
+        g_state.reviewLeft = nullptr;
+        g_state.reviewRight = nullptr;
+        g_state.reviewUnknown = nullptr;
+    }
+
+    std::string windowColumnText(int first, int last) {
+        std::ostringstream out;
+        for (int window = first; window <= last; ++window) {
+            out << window << (window == 1 ? " frame" : " frames")
+                << " : " << g_state.windowCounts[window];
+            if (window != last) out << "\n";
+        }
+        return out.str();
+    }
+
+    void rebuildWindowCounts() {
+        g_state.windowCounts.fill(0);
+        g_state.scanUnknownCount = 0;
+        for (size_t i = 0; i < g_state.events.size() && i < g_state.windowSizes.size(); ++i) {
+            if (!g_state.events[i].pressed) continue;
+            const int measured = g_state.windowSizes[i];
+            if (measured <= 0) {
+                ++g_state.scanUnknownCount;
+            } else {
+                ++g_state.windowCounts[std::clamp(measured, 1, 17)];
+            }
+        }
+    }
+
+    void updateReviewHud(PlayLayer* layer) {
+        if (!g_state.windowReviewActive || !layer) {
+            removeReviewHud();
+            return;
+        }
+
+        if (!g_state.reviewPanel || g_state.reviewPanel->getParent() != layer) {
+            removeReviewHud();
+            auto size = CCDirector::sharedDirector()->getWinSize();
+            auto panel = CCLayerColor::create(ccc4(7, 14, 28, 226), 224.f, 326.f);
+            if (!panel) return;
+            panel->setPosition({size.width - 236.f, size.height - 338.f});
+            panel->setID("fairframe-window-review-panel"_spr);
+
+            auto accent = CCLayerColor::create(ccc4(68, 224, 255, 255), 224.f, 3.f);
+            accent->setPosition({0.f, 323.f});
+            panel->addChild(accent, 2);
+
+            auto title = CCLabelBMFont::create("WINDOW REVIEW", "bigFont.fnt");
+            title->setAnchorPoint({0.f, 0.5f});
+            title->setPosition({11.f, 304.f});
+            title->setScale(0.46f);
+            title->setColor(ccc3(88, 228, 255));
+            panel->addChild(title);
+
+            auto status = CCLabelBMFont::create("READY", "chatFont.fnt");
+            status->setAnchorPoint({0.f, 0.5f});
+            status->setPosition({11.f, 282.f});
+            status->setScale(0.43f);
+            status->setColor(ccc3(232, 241, 255));
+            panel->addChild(status);
+            g_state.reviewStatus = status;
+
+            auto left = CCLabelBMFont::create("", "chatFont.fnt");
+            left->setAnchorPoint({0.f, 1.f});
+            left->setPosition({11.f, 257.f});
+            left->setScale(0.43f);
+            left->setColor(ccc3(235, 240, 250));
+            panel->addChild(left);
+            g_state.reviewLeft = left;
+
+            auto right = CCLabelBMFont::create("", "chatFont.fnt");
+            right->setAnchorPoint({0.f, 1.f});
+            right->setPosition({118.f, 257.f});
+            right->setScale(0.43f);
+            right->setColor(ccc3(235, 240, 250));
+            panel->addChild(right);
+            g_state.reviewRight = right;
+
+            auto unknown = CCLabelBMFont::create("", "chatFont.fnt");
+            unknown->setAnchorPoint({0.f, 0.5f});
+            unknown->setPosition({11.f, 20.f});
+            unknown->setScale(0.43f);
+            unknown->setColor(ccc3(255, 190, 100));
+            panel->addChild(unknown);
+            g_state.reviewUnknown = unknown;
+
+            layer->addChild(panel, 10001);
+            g_state.reviewPanel = panel;
+        }
+
+        if (g_state.reviewStatus) {
+            std::ostringstream status;
+            if (g_state.windowScanActive) {
+                const int percent = g_state.scanTrialsTotal > 0
+                    ? std::min(100, g_state.scanTrialsDone * 100 / g_state.scanTrialsTotal)
+                    : 0;
+                status << "SCANNING " << percent << "%  "
+                       << g_state.scanTargetCursor + 1 << "/" << g_state.scanTargets.size();
+            } else {
+                status << "MEASURED INPUTS";
+            }
+            g_state.reviewStatus->setString(status.str().c_str());
+        }
+        if (g_state.reviewLeft) g_state.reviewLeft->setString(windowColumnText(1, 9).c_str());
+        if (g_state.reviewRight) g_state.reviewRight->setString(windowColumnText(10, 17).c_str());
+        if (g_state.reviewUnknown) {
+            std::ostringstream text;
+            text << "Unknown / impossible: " << g_state.scanUnknownCount
+                 << "\n17+ is grouped into 17 frames";
+            g_state.reviewUnknown->setString(text.str().c_str());
+        }
+    }
+
+    bool saveWindowResults(PlayLayer* layer) {
+        if (!layer || g_state.windowSizes.size() != g_state.events.size()) return false;
+        std::error_code ec;
+        std::filesystem::create_directories(Mod::get()->getSaveDir(), ec);
+        std::ofstream file(windowResultsPath(layer), std::ios::out | std::ios::trunc);
+        if (!file) return false;
+        file << "# FairFrame window review\n";
+        file << "# Event count: " << g_state.events.size() << "\n";
+        file << "event_index,window_frames\n";
+        for (size_t i = 0; i < g_state.events.size(); ++i) {
+            if (g_state.events[i].pressed) file << i << ',' << g_state.windowSizes[i] << '\n';
+        }
+        return true;
+    }
+
+    bool loadWindowResults(PlayLayer* layer) {
+        if (!layer) return false;
+        std::ifstream file(windowResultsPath(layer));
+        if (!file) return false;
+        std::string line;
+        int eventCount = -1;
+        std::vector<std::pair<size_t, int>> loaded;
+        while (std::getline(file, line)) {
+            if (line.rfind("# Event count: ", 0) == 0) {
+                eventCount = toInt(line.substr(15), -1);
+                continue;
+            }
+            if (line.empty() || line[0] == '#') continue;
+            if (line.rfind("event_index,", 0) == 0) continue;
+            auto columns = splitCsvLine(line);
+            if (columns.size() < 2) continue;
+            const int index = toInt(columns[0], -1);
+            const int window = toInt(columns[1], 0);
+            if (index >= 0) loaded.emplace_back(static_cast<size_t>(index), window);
+        }
+        if (eventCount != static_cast<int>(g_state.events.size()) || loaded.empty()) return false;
+
+        g_state.windowSizes.assign(g_state.events.size(), 0);
+        for (auto const& [index, window] : loaded) {
+            if (index < g_state.windowSizes.size() && g_state.events[index].pressed) {
+                g_state.windowSizes[index] = window;
+            }
+        }
+        rebuildWindowCounts();
+        g_state.windowReviewActive = true;
+        return true;
+    }
+
     void createHud(PlayLayer* layer) {
         if (!layer || !g_state.showHud || g_state.hudPanel) return;
 
@@ -189,23 +384,24 @@ namespace {
     void updateHud(PlayLayer* layer) {
         if (!g_state.showHud) {
             removeHud();
-            return;
-        }
-        if (!g_state.hudPanel || g_state.hudPanel->getParent() != layer) {
-            removeHud();
-            createHud(layer);
-        }
+        } else {
+            if (!g_state.hudPanel || g_state.hudPanel->getParent() != layer) {
+                removeHud();
+                createHud(layer);
+            }
 
-        if (g_state.hudBody) {
-            std::ostringstream text;
-            text << (g_state.recording ? "● RECORDING" : g_state.playing ? "▶ REPLAYING" : "○ " + modeText())
-                 << "\nFRAME " << g_state.frame
-                 << "     CLICKS " << clickCount()
-                 << "     EVENTS " << g_state.events.size()
-                 << "\n" << lastEventText()
-                 << "\n" << g_state.lastMessage;
-            g_state.hudBody->setString(text.str().c_str());
+            if (g_state.hudBody) {
+                std::ostringstream text;
+                text << (g_state.windowScanActive ? "◉ WINDOW SCAN" : g_state.recording ? "● RECORDING" : g_state.playing ? "▶ REPLAYING" : "○ " + modeText())
+                     << "\nFRAME " << g_state.frame
+                     << "     CLICKS " << clickCount()
+                     << "     EVENTS " << g_state.events.size()
+                     << "\n" << lastEventText()
+                     << "\n" << g_state.lastMessage;
+                g_state.hudBody->setString(text.str().c_str());
+            }
         }
+        updateReviewHud(layer);
     }
 
 
@@ -396,6 +592,13 @@ namespace {
     void beginRecording(PlayLayer* layer) {
         captureRecordingStart(layer);
         g_state.takeDurationFrames = 0;
+        g_state.windowReviewActive = false;
+        g_state.windowCounts.fill(0);
+        g_state.scanUnknownCount = 0;
+        g_state.windowSizes.clear();
+        std::error_code removeEc;
+        std::filesystem::remove(windowResultsPath(layer), removeEc);
+        removeReviewHud();
         g_state.events.clear();
         g_state.pressStartedAt.clear();
         g_state.replayIndex = 0;
@@ -447,11 +650,13 @@ namespace {
 
     void startLevel(PlayLayer* layer) {
         removeHud();
+        removeReviewHud();
         clearRecordingCheckpoint();
         g_state.takeRecordedPractice = false;
         g_state.takeStartedAtCheckpoint = false;
         g_state.activeLayer = layer;
         g_state.frame = 0;
+        g_state.takeDurationFrames = 0;
         g_state.attempt = 1;
         g_state.previousEventFrame = -1;
         g_state.previousEventAttempt = 1;
@@ -461,16 +666,34 @@ namespace {
         g_state.recording = false;
         g_state.playing = false;
         g_state.playbackFinished = false;
+        g_state.windowScanActive = false;
+        g_state.windowScanTrialActive = false;
+        g_state.windowReviewActive = false;
+        g_state.scanInternalReset = false;
+        g_state.windowCounts.fill(0);
+        g_state.scanUnknownCount = 0;
+        g_state.windowSizes.clear();
         g_state.events.clear();
         g_state.lastMessage = "READY";
         loadTake(layer, false);
+        if (!loadWindowResults(layer)) {
+            g_state.windowSizes.assign(g_state.events.size(), 0);
+            g_state.windowCounts.fill(0);
+            g_state.scanUnknownCount = 0;
+        }
     }
 
     void processReplayFrame(PlayLayer* layer) {
         if (!g_state.playing || !layer) return;
 
-        while (g_state.replayIndex < g_state.events.size() &&
-               g_state.events[g_state.replayIndex].frame <= g_state.frame) {
+        while (g_state.replayIndex < g_state.events.size()) {
+            const size_t eventIndex = g_state.replayIndex;
+            int scheduledFrame = g_state.events[eventIndex].frame;
+            if (g_state.windowScanActive && g_state.windowScanTrialActive &&
+                eventIndex == g_state.scanTargetEventIndex) {
+                scheduledFrame = std::max(0, scheduledFrame + g_state.scanCurrentOffset);
+            }
+            if (scheduledFrame > g_state.frame) break;
             auto const event = g_state.events[g_state.replayIndex++];
             auto player = playerFor(layer, event.player);
             if (!player) continue;
@@ -486,13 +709,158 @@ namespace {
 
         // Keep playback alive after the final input so the level can reach a death/reset.
         // This is important for practice mode, where a take often ends at the checkpoint reset.
-        if (g_state.replayIndex >= g_state.events.size() &&
+        if (!g_state.windowScanActive && g_state.replayIndex >= g_state.events.size() &&
             g_state.frame > g_state.takeDurationFrames + 120) {
             stopReplay(layer, "REPLAY INPUTS FINISHED");
             g_state.playbackFinished = true;
         }
     }
 }
+
+    void finishScanTarget() {
+        if (g_state.scanTargetCursor >= g_state.scanTargets.size()) return;
+        const auto target = g_state.scanTargets[g_state.scanTargetCursor];
+        int passed = 0;
+        for (int result : g_state.scanCandidateResults) {
+            if (result == 1) ++passed;
+        }
+        g_state.windowSizes[target] = passed > 0 ? std::min(17, passed) : 0;
+        rebuildWindowCounts();
+        ++g_state.scanTargetCursor;
+        g_state.scanOffset = -17;
+        g_state.scanCandidateResults.assign(35, -1);
+    }
+
+    void completeScanTrial(PlayLayer* layer, bool passed, bool stateAlreadyReset = false) {
+        if (!g_state.windowScanActive || !g_state.windowScanTrialActive) return;
+        const int resultIndex = g_state.scanCurrentOffset + 17;
+        if (resultIndex >= 0 && resultIndex < static_cast<int>(g_state.scanCandidateResults.size())) {
+            g_state.scanCandidateResults[resultIndex] = passed ? 1 : 0;
+        }
+        ++g_state.scanTrialsDone;
+        g_state.windowScanTrialActive = false;
+        g_state.playing = false;
+        releaseReplayButtons(layer);
+        startNextScanTrial(layer, stateAlreadyReset);
+    }
+
+    void startNextScanTrial(PlayLayer* layer, bool stateAlreadyReset = false) {
+        if (!g_state.windowScanActive || !layer) return;
+
+        while (g_state.scanTargetCursor < g_state.scanTargets.size()) {
+            const size_t target = g_state.scanTargets[g_state.scanTargetCursor];
+            if (g_state.scanCandidateResults.size() != 35) {
+                g_state.scanCandidateResults.assign(35, -1);
+            }
+
+            if (g_state.scanOffset > 17) {
+                finishScanTarget();
+                continue;
+            }
+
+            const int offset = g_state.scanOffset++;
+            const int baseFrame = g_state.events[target].frame;
+            const int previousFrame = target > 0 ? g_state.events[target - 1].frame : 0;
+            const int nextFrame = target + 1 < g_state.events.size()
+                ? g_state.events[target + 1].frame
+                : g_state.takeDurationFrames;
+            const int minOffset = std::max(-17, previousFrame - baseFrame);
+            const int maxOffset = std::min(17, nextFrame - baseFrame);
+
+            if (offset < minOffset || offset > maxOffset) {
+                g_state.scanCandidateResults[offset + 17] = 0;
+                ++g_state.scanTrialsDone;
+                continue;
+            }
+
+            g_state.scanTargetEventIndex = target;
+            g_state.scanCurrentOffset = offset;
+            g_state.scanDeadlineFrame = std::max(baseFrame, nextFrame);
+            g_state.windowScanTrialActive = false;
+            g_state.playing = false;
+            g_state.replayIndex = 0;
+            g_state.pressStartedAt.clear();
+            releaseReplayButtons(layer);
+
+            if (stateAlreadyReset) {
+                g_state.frame = 0;
+                g_state.attempt = 1;
+                g_state.windowScanTrialActive = true;
+                g_state.playing = true;
+                ++g_state.scanTrialSerial;
+                g_state.lastMessage = "TESTING CLICK " + std::to_string(target + 1);
+            } else {
+                g_state.scanInternalReset = true;
+                layer->resetLevel();
+            }
+            return;
+        }
+
+        g_state.windowScanActive = false;
+        g_state.windowScanTrialActive = false;
+        g_state.scanInternalReset = false;
+        g_state.playing = false;
+        g_state.scanCandidateResults.clear();
+        g_state.lastMessage = "WINDOW REVIEW COMPLETE";
+        rebuildWindowCounts();
+        saveWindowResults(layer);
+        updateReviewHud(layer);
+    }
+
+    bool beginWindowScan(PlayLayer* layer) {
+        if (!layer) return false;
+
+        if (g_state.events.empty()) loadTake(layer, false);
+        if (g_state.events.empty()) {
+            FLAlertLayer::create("FairFrame", "Record a take first, then scan its frame windows.", "OK")->show();
+            return false;
+        }
+
+        if (g_state.takeRecordedPractice && g_state.takeStartedAtCheckpoint &&
+            !g_state.recordingCheckpoint && layer->m_isPracticeMode) {
+            if (auto checkpoint = layer->getLastCheckpoint()) {
+                checkpoint->retain();
+                g_state.recordingCheckpoint = checkpoint;
+            }
+        }
+        if (g_state.takeRecordedPractice && g_state.takeStartedAtCheckpoint &&
+            !g_state.recordingCheckpoint) {
+            FLAlertLayer::create(
+                "FairFrame — Practice Review",
+                "This take started at a practice checkpoint. Recreate that checkpoint in the current session, then start the scan again.",
+                "OK"
+            )->show();
+            return false;
+        }
+
+        g_state.scanTargets.clear();
+        for (size_t i = 0; i < g_state.events.size(); ++i) {
+            if (g_state.events[i].pressed) g_state.scanTargets.push_back(i);
+        }
+        if (g_state.scanTargets.empty()) {
+            FLAlertLayer::create("FairFrame", "This take has no press events to review.", "OK")->show();
+            return false;
+        }
+
+        g_state.windowCounts.fill(0);
+        g_state.scanUnknownCount = 0;
+        g_state.windowSizes.assign(g_state.events.size(), 0);
+        g_state.windowReviewActive = true;
+        g_state.windowScanActive = true;
+        g_state.windowScanTrialActive = false;
+        g_state.scanInternalReset = false;
+        g_state.scanTargetCursor = 0;
+        g_state.scanOffset = -17;
+        g_state.scanTrialsDone = 0;
+        g_state.scanTrialsTotal = static_cast<int>(g_state.scanTargets.size()) * 35;
+        g_state.scanCandidateResults.assign(35, -1);
+        g_state.playing = false;
+        g_state.recording = false;
+        g_state.lastMessage = "WINDOW SCAN STARTING";
+        startNextScanTrial(layer, false);
+        return true;
+    }
+
 
 class $modify(FairFramePlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
@@ -503,13 +871,67 @@ class $modify(FairFramePlayLayer, PlayLayer) {
 
     void postUpdate(float dt) {
         if (g_state.activeLayer != this) startLevel(this);
+
         processReplayFrame(this);
+        const int serialBeforeUpdate = g_state.scanTrialSerial;
         PlayLayer::postUpdate(dt);
+
+        if (g_state.scanTrialSerial != serialBeforeUpdate) {
+            updateHud(this);
+            return;
+        }
+
         ++g_state.frame;
+
+        if (g_state.windowScanActive && g_state.windowScanTrialActive) {
+            const size_t target = g_state.scanTargetEventIndex;
+            const size_t neededIndex = target + 1 < g_state.events.size()
+                ? target + 2
+                : target + 1;
+            if (g_state.frame > g_state.scanDeadlineFrame &&
+                g_state.replayIndex >= neededIndex) {
+                completeScanTrial(this, true, false);
+                updateHud(this);
+                return;
+            }
+        }
+
         updateHud(this);
     }
 
     void resetLevel() {
+        if (g_state.windowScanActive) {
+            const bool internalReset = g_state.scanInternalReset;
+            releaseReplayButtons(this);
+            PlayLayer::resetLevel();
+            g_state.frame = 0;
+            ++g_state.attempt;
+            g_state.previousEventFrame = -1;
+            g_state.pressStartedAt.clear();
+            g_state.replayIndex = 0;
+
+            if (g_state.takeRecordedPractice && g_state.takeStartedAtCheckpoint &&
+                g_state.recordingCheckpoint) {
+                this->loadFromCheckpoint(g_state.recordingCheckpoint);
+            }
+
+            if (internalReset) {
+                g_state.scanInternalReset = false;
+                g_state.windowScanTrialActive = true;
+                g_state.playing = true;
+                ++g_state.scanTrialSerial;
+                g_state.lastMessage = "TESTING CLICK " +
+                    std::to_string(g_state.scanTargets[g_state.scanTargetCursor] + 1);
+                return;
+            }
+
+            if (g_state.windowScanTrialActive) {
+                completeScanTrial(this, false, true);
+                return;
+            }
+            return;
+        }
+
         const bool restartReplay = g_state.playing;
         if (g_state.recording) {
             g_state.takeDurationFrames = g_state.frame;
@@ -543,6 +965,12 @@ class $modify(FairFramePlayLayer, PlayLayer) {
             g_state.lastMessage = "TAKE SAVED";
         }
         if (g_state.playing) stopReplay(this, "LEVEL COMPLETE");
+        if (g_state.windowScanActive) {
+            g_state.windowScanActive = false;
+            g_state.windowScanTrialActive = false;
+            g_state.playing = false;
+            g_state.lastMessage = "SCAN STOPPED: LEVEL COMPLETED";
+        }
         PlayLayer::levelComplete();
     }
 
@@ -553,7 +981,11 @@ class $modify(FairFramePlayLayer, PlayLayer) {
             if (!g_state.events.empty()) exportTake(this, true);
         }
         if (g_state.playing) stopReplay(this, "REPLAY STOPPED");
+        g_state.windowScanActive = false;
+        g_state.windowScanTrialActive = false;
+        g_state.scanInternalReset = false;
         removeHud();
+        removeReviewHud();
         clearRecordingCheckpoint();
         g_state.activeLayer = nullptr;
         PlayLayer::onQuit();
@@ -590,7 +1022,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
 
         auto winSize = CCDirector::sharedDirector()->getWinSize();
         constexpr float panelWidth = 344.f;
-        constexpr float panelHeight = 326.f;
+        constexpr float panelHeight = 360.f;
 
         auto panel = CCLayerColor::create(ccc4(7, 15, 30, 246), panelWidth, panelHeight);
         panel->setPosition({18.f, winSize.height - panelHeight - 18.f});
@@ -627,7 +1059,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         m_fields->status = status;
 
         auto menu = CCMenu::create();
-        menu->setPosition({panelWidth * 0.5f, 198.f});
+        menu->setPosition({panelWidth * 0.5f, 218.f});
         menu->setID("fairframe-control-buttons"_spr);
 
         auto recordSprite = ButtonSprite::create("RECORD / STOP", "bigFont.fnt", "GJ_button_01.png", 0.66f);
@@ -690,20 +1122,29 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         closeButton->setID("fairframe-close-button"_spr);
         menu->addChild(closeButton);
 
+        auto scanSprite = ButtonSprite::create("SCAN WINDOWS", "bigFont.fnt", "GJ_button_01.png", 0.66f);
+        scanSprite->setScale(0.48f);
+        auto scanButton = CCMenuItemSpriteExtra::create(
+            scanSprite, this, menu_selector(FairFramePauseLayer::onScanWindows)
+        );
+        scanButton->setPosition({0.f, -126.f});
+        scanButton->setID("fairframe-scan-windows-button"_spr);
+        menu->addChild(scanButton);
+
         panel->addChild(menu, 3);
 
         auto eventsList = CCLabelBMFont::create(recentEventsText().c_str(), "chatFont.fnt");
         eventsList->setAnchorPoint({0.f, 1.f});
-        eventsList->setPosition({15.f, 104.f});
+        eventsList->setPosition({15.f, 55.f});
         eventsList->setScale(0.45f);
         eventsList->setColor(ccc3(204, 222, 244));
         eventsList->setID("fairframe-recent-events"_spr);
         panel->addChild(eventsList);
         m_fields->eventsList = eventsList;
 
-        auto hint = CCLabelBMFont::create("Practice takes replay from the checkpoint used when recording started.", "chatFont.fnt");
+        auto hint = CCLabelBMFont::create("Practice takes use the checkpoint captured at record start.", "chatFont.fnt");
         hint->setAnchorPoint({0.f, 0.5f});
-        hint->setPosition({15.f, 13.f});
+        hint->setPosition({15.f, 12.f});
         hint->setScale(0.36f);
         hint->setColor(ccc3(140, 164, 194));
         panel->addChild(hint);
@@ -790,6 +1231,10 @@ class $modify(FairFramePauseLayer, PauseLayer) {
             auto checkpoint = g_state.recordingCheckpoint;
             if (!checkpoint && layer->m_isPracticeMode) {
                 checkpoint = layer->getLastCheckpoint();
+                if (checkpoint) {
+                    checkpoint->retain();
+                    g_state.recordingCheckpoint = checkpoint;
+                }
             }
             if (!checkpoint) {
                 FLAlertLayer::create(
@@ -827,6 +1272,31 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         this->onResume(nullptr);
     }
 
+    void onScanWindows(CCObject*) {
+        auto layer = PlayLayer::get();
+        if (!layer) {
+            FLAlertLayer::create("FairFrame", "Open a level before scanning windows.", "OK")->show();
+            return;
+        }
+
+        if (g_state.windowScanActive) {
+            g_state.windowScanActive = false;
+            g_state.windowScanTrialActive = false;
+            g_state.scanInternalReset = false;
+            g_state.playing = false;
+            releaseReplayButtons(layer);
+            layer->resetLevel();
+            g_state.lastMessage = "WINDOW SCAN CANCELLED";
+            this->onResume(nullptr);
+            return;
+        }
+
+        if (beginWindowScan(layer)) {
+            refreshStatus();
+            this->onResume(nullptr);
+        }
+    }
+
     void onExportCsv(CCObject*) {
         exportTake(PlayLayer::get(), false);
         refreshStatus();
@@ -850,7 +1320,13 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         if (layer) {
             std::error_code ec;
             std::filesystem::remove(takePath(layer), ec);
+            std::filesystem::remove(windowResultsPath(layer), ec);
         }
+        g_state.windowReviewActive = false;
+        g_state.windowSizes.clear();
+        g_state.windowCounts.fill(0);
+        g_state.scanUnknownCount = 0;
+        removeReviewHud();
         refreshStatus();
     }
 
