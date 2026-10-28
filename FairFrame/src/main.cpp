@@ -434,7 +434,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         auto button = static_cast<CCMenuItemSpriteExtra*>(sender);
         auto sprite = static_cast<ButtonSprite*>(button->getNormalImage());
         sprite->setString(g_state.showHud ? "HUD: ON" : "HUD: OFF");
-        sprite->updateSprite();
+
         if (!g_state.showHud) removeHud();
         refreshStatus();
     }
