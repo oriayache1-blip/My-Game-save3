@@ -31,6 +31,7 @@ namespace {
         CCLabelBMFont* hudTitle = nullptr;
         CCLabelBMFont* hudBody = nullptr;
         int frame = 0;
+        int takeDurationFrames = 0;
         int attempt = 1;
         int previousEventFrame = -1;
         int previousEventAttempt = 1;
@@ -252,6 +253,7 @@ namespace {
         file << "# Level: " << currentLevelName(layer) << "\n";
         file << "# Practice: " << (g_state.takeRecordedPractice ? 1 : 0) << "\n";
         file << "# Started at checkpoint: " << (g_state.takeStartedAtCheckpoint ? 1 : 0) << "\n";
+        file << "# Duration frames: " << g_state.takeDurationFrames << "\n";
         file << "# Practice checkpoint replay requires the same checkpoint if reopening the take in a later session.\n";
         file << "attempt,frame,player,action,delta_frames,hold_frames\n";
         for (auto const& event : g_state.events) {
@@ -286,6 +288,8 @@ namespace {
         std::vector<FrameEvent> loaded;
         std::string line;
         int latestAttempt = 1;
+        bool hasDuration = false;
+        g_state.takeDurationFrames = 0;
         g_state.takeRecordedPractice = false;
         g_state.takeStartedAtCheckpoint = false;
 
@@ -297,6 +301,11 @@ namespace {
             }
             if (line.rfind("# Started at checkpoint: ", 0) == 0) {
                 g_state.takeStartedAtCheckpoint = toInt(line.substr(25), 0) != 0;
+                continue;
+            }
+            if (line.rfind("# Duration frames: ", 0) == 0) {
+                g_state.takeDurationFrames = std::max(0, toInt(line.substr(19), 0));
+                hasDuration = true;
                 continue;
             }
             if (line[0] == '#') continue;
@@ -343,6 +352,13 @@ namespace {
 
         g_state.previousEventFrame = g_state.events.empty() ? -1 : g_state.events.back().frame;
         g_state.previousEventAttempt = 1;
+        if (!hasDuration) {
+            g_state.takeDurationFrames = g_state.events.empty() ? 0 : g_state.events.back().frame;
+        }
+        g_state.takeDurationFrames = std::max(
+            g_state.takeDurationFrames,
+            g_state.events.empty() ? 0 : g_state.events.back().frame
+        );
         if (!g_state.events.empty()) {
             g_state.lastMessage = "LAST TAKE LOADED";
             if (announce) {
@@ -379,6 +395,7 @@ namespace {
 
     void beginRecording(PlayLayer* layer) {
         captureRecordingStart(layer);
+        g_state.takeDurationFrames = 0;
         g_state.events.clear();
         g_state.pressStartedAt.clear();
         g_state.replayIndex = 0;
@@ -467,8 +484,11 @@ namespace {
             }
         }
 
-        if (g_state.replayIndex >= g_state.events.size()) {
-            stopReplay(layer, "REPLAY FINISHED");
+        // Keep playback alive after the final input so the level can reach a death/reset.
+        // This is important for practice mode, where a take often ends at the checkpoint reset.
+        if (g_state.replayIndex >= g_state.events.size() &&
+            g_state.frame > g_state.takeDurationFrames + 120) {
+            stopReplay(layer, "REPLAY INPUTS FINISHED");
             g_state.playbackFinished = true;
         }
     }
@@ -490,12 +510,14 @@ class $modify(FairFramePlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
+        const bool restartReplay = g_state.playing;
         if (g_state.recording) {
+            g_state.takeDurationFrames = g_state.frame;
             g_state.recording = false;
             if (!g_state.events.empty()) exportTake(this, true);
             g_state.lastMessage = this->m_isPracticeMode ? "PRACTICE TAKE SAVED" : "TAKE SAVED ON RESET";
         }
-        if (g_state.playing) stopReplay(this, "REPLAY STOPPED");
+        if (restartReplay) releaseReplayButtons(this);
         PlayLayer::resetLevel();
         g_state.frame = 0;
         ++g_state.attempt;
@@ -503,10 +525,19 @@ class $modify(FairFramePlayLayer, PlayLayer) {
         g_state.previousEventAttempt = g_state.attempt;
         g_state.pressStartedAt.clear();
         g_state.replayIndex = 0;
+        if (restartReplay) {
+            g_state.playing = true;
+            g_state.playbackFinished = false;
+            g_state.replayHeld.clear();
+            g_state.lastMessage = this->m_isPracticeMode
+                ? "PRACTICE REPLAY RESTARTED"
+                : "REPLAY RESTARTED";
+        }
     }
 
     void levelComplete() {
         if (g_state.recording) {
+            g_state.takeDurationFrames = g_state.frame;
             g_state.recording = false;
             exportTake(this, true);
             g_state.lastMessage = "TAKE SAVED";
@@ -517,6 +548,7 @@ class $modify(FairFramePlayLayer, PlayLayer) {
 
     void onQuit() {
         if (g_state.recording) {
+            g_state.takeDurationFrames = g_state.frame;
             g_state.recording = false;
             if (!g_state.events.empty()) exportTake(this, true);
         }
@@ -699,9 +731,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         if (!m_fields->panel) return;
         bool open = !m_fields->panel->isVisible();
         m_fields->panel->setVisible(open);
-        if (m_fields->launcherSprite) {
-            m_fields->launcherSprite->setString(open ? "X" : "FF");
-        }
+        // Keep the launcher icon stable so its hitbox never changes while toggling the panel.
     }
 
     void onToggleRecording(CCObject*) {
@@ -712,6 +742,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         }
 
         if (g_state.recording) {
+            g_state.takeDurationFrames = g_state.frame;
             g_state.recording = false;
             if (!g_state.events.empty()) {
                 exportTake(layer, true);
@@ -740,6 +771,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         }
 
         if (g_state.recording) {
+            g_state.takeDurationFrames = g_state.frame;
             g_state.recording = false;
             if (!g_state.events.empty()) exportTake(layer, true);
         }
@@ -782,6 +814,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         }
 
         g_state.frame = 0;
+        g_state.takeDurationFrames = 0;
         g_state.attempt = 1;
         g_state.replayIndex = 0;
         g_state.replayHeld.clear();
@@ -807,6 +840,7 @@ class $modify(FairFramePauseLayer, PauseLayer) {
         g_state.events.clear();
         g_state.pressStartedAt.clear();
         g_state.replayIndex = 0;
+        g_state.takeDurationFrames = 0;
         g_state.previousEventFrame = -1;
         g_state.previousEventAttempt = g_state.attempt;
         g_state.lastMessage = "TAKE CLEARED";
