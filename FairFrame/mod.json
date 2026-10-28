@@ -1,12 +1,10 @@
 {
-  "geode": "v5.11.2",
-  "gd": {
-    "win": "2.2081"
-  },
+  "geode": "5.11.2",
+  "gd": { "win": "2.2081" },
   "id": "fairframe.frame-counter",
   "name": "FairFrame",
   "version": "v0.1.0",
   "developer": "FairFrame",
-  "description": "A free, offline frame counter and click timing recorder for Geometry Dash.",
+  "description": "Free offline frame counter",
   "tags": ["utility", "offline", "interface"]
 }
